@@ -1104,4 +1104,33 @@ ssh -p $VPS_PORT $VPS_USER@$VPS_HOST
 **Need help?**
 - Read full [README.md](README.md)
 - Open [GitHub Issue](https://github.com/YOUR_USERNAME/postgres-backup-automation/issues)
+
+### Access to bucket of Blackblaze B2
+## 1. Install B2 CLI
+```bash
+brew install b2-tools
 ```
+
+**Don't have brew:
+```bash
+pip3 install b2
+```
+
+## 2. Authorize account
+```bash
+b2 account authorize
+```
+
+**They ask:
+- `applicationKeyId` → B2_APPLICATION_KEY_ID (B2_ACCOUNT_ID) của bạn
+- `applicationKey` → B2_APPLICATION_KEY của bạn
+
+## 3. List files
+```bash
+# List bucket
+b2 ls b2://BUCKET_NAME/
+
+# More detail
+b2 ls --long --recursive b2://BUCKET_NAME/
+```
+example: b2 ls b2://vocab-postgres-backups/backups
