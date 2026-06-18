@@ -34,7 +34,12 @@ b2 file upload \
   "backups/$BACKUP_FILE"
 
 echo -e "${YELLOW}Verifying upload...${NC}"
-if b2 ls "$B2_BUCKET_NAME" "backups/$BACKUP_FILE" > /dev/null 2>&1; then
+echo "DEBUG: b2 ls b2://$B2_BUCKET_NAME/backups/$BACKUP_FILE"
+b2 ls "b2://$B2_BUCKET_NAME/backups/$BACKUP_FILE" 2>&1 || true
+echo "DEBUG: b2 ls exit code: $?"
+echo "DEBUG: b2 ls bucket root:"
+b2 ls "b2://$B2_BUCKET_NAME/backups/" 2>&1 | head -5 || true
+if b2 ls "b2://$B2_BUCKET_NAME/backups/$BACKUP_FILE" > /dev/null 2>&1; then
   echo -e "${GREEN}✓ Upload successful${NC}"
   B2_URL=$(b2 file url "b2://$B2_BUCKET_NAME/backups/$BACKUP_FILE" 2>/dev/null || echo "N/A")
   echo "B2_URL=$B2_URL" >> /tmp/pg-backups/backup-info.env
