@@ -23,11 +23,11 @@ fi
 source "$(dirname "$0")/b2-install.sh"
 
 echo -e "${YELLOW}Authorizing with B2...${NC}"
-b2 authorize-account "$B2_ACCOUNT_ID" "$B2_APPLICATION_KEY" > /dev/null
+b2 account authorize "$B2_ACCOUNT_ID" "$B2_APPLICATION_KEY" > /dev/null
 
 echo -e "${YELLOW}Uploading $BACKUP_FILE...${NC}"
-b2 upload-file \
-  --contentType "application/gzip" \
+b2 file upload \
+  --content-type "application/gzip" \
   "$B2_BUCKET_NAME" \
   "$BACKUP_PATH" \
   "backups/$BACKUP_FILE"
@@ -35,7 +35,7 @@ b2 upload-file \
 echo -e "${YELLOW}Verifying upload...${NC}"
 if b2 ls "$B2_BUCKET_NAME" "backups/$BACKUP_FILE" > /dev/null 2>&1; then
   echo -e "${GREEN}✓ Upload successful${NC}"
-  B2_URL=$(b2 get-download-url-with-auth "$B2_BUCKET_NAME" "backups/$BACKUP_FILE" 3600 2>/dev/null || echo "N/A")
+  B2_URL=$(b2 file url "b2://$B2_BUCKET_NAME/backups/$BACKUP_FILE" 2>/dev/null || echo "N/A")
   echo "B2_URL=$B2_URL" >> /tmp/pg-backups/backup-info.env
 else
   echo -e "${RED}ERROR: Upload verification failed${NC}"
