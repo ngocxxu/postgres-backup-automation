@@ -23,7 +23,8 @@ fi
 source "$(dirname "$0")/b2-install.sh"
 
 echo -e "${YELLOW}Authorizing with B2...${NC}"
-b2 account authorize "$B2_ACCOUNT_ID" "$B2_APPLICATION_KEY" > /dev/null
+export B2_APPLICATION_KEY_ID="$B2_ACCOUNT_ID"
+b2 account authorize > /dev/null
 
 echo -e "${YELLOW}Uploading $BACKUP_FILE...${NC}"
 b2 file upload \
