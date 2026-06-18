@@ -24,9 +24,17 @@ BACKUP_PATH="${BACKUP_DIR}/${BACKUP_FILE}"
 mkdir -p "$BACKUP_DIR"
 
 echo -e "${YELLOW}Finding PostgreSQL pod...${NC}"
+echo "DEBUG: NAMESPACE=$NAMESPACE"
+echo "DEBUG: LABEL_SELECTOR=$LABEL_SELECTOR"
+echo "DEBUG: kubectl context: $(kubectl config current-context 2>/dev/null || echo 'NO CONTEXT')"
+echo "DEBUG: All pods in namespace '$NAMESPACE':"
+kubectl get pods -n "$NAMESPACE" --show-labels 2>&1 || echo "DEBUG: kubectl get pods FAILED (exit $?)"
+
 POSTGRES_POD=$(kubectl get pods -n "$NAMESPACE" \
   -l "$LABEL_SELECTOR" \
   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+
+echo "DEBUG: Resolved POSTGRES_POD='$POSTGRES_POD'"
 
 if [ -z "$POSTGRES_POD" ]; then
   echo -e "${RED}ERROR: No PostgreSQL pod found with label: $LABEL_SELECTOR${NC}"
