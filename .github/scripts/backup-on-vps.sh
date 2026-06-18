@@ -53,8 +53,7 @@ echo -e "${GREEN}✓ Pod is running${NC}"
 
 echo -e "${YELLOW}Creating database backup...${NC}"
 kubectl exec -n "$NAMESPACE" "$POSTGRES_POD" \
-  --env "PGPASSWORD=$DB_PASSWORD" \
-  -- pg_dump -U "$DB_USER" -d "$DB_NAME" --no-owner --no-acl \
+  -- env PGPASSWORD="$DB_PASSWORD" pg_dump -U "$DB_USER" -d "$DB_NAME" --no-owner --no-acl \
   | gzip -9 > "$BACKUP_PATH"
 
 if [ ! -f "$BACKUP_PATH" ]; then
