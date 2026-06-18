@@ -1,0 +1,176 @@
+name: Backup Health Check
+
+on:
+  schedule:
+  # Run 2 hours after backup (Sunday 21:00 UTC = 4:00 AM Monday UTC+7)
+  - cron: '0 21 * * 0'
+
+  workflow_dispatch:
+
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - name: 📥 Checkout repository
+      uses: actions/checkout@v4
+
+    - name: 🔧 Setup SSH
+      uses: ./.github/actions/setup-ssh
+      with:
+        ssh_key: ${{ secrets.VPS_SSH_KEY }}
+        host: ${{ secrets.VPS_HOST }}
+        port: ${{ secrets.VPS_PORT }}
+
+    - name: 🏥 Check last backup
+      id: check
+      run: |
+        RESULT=$(ssh -p ${{ secrets.VPS_PORT }} \
+          ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+          'bash -s' << 'ENDSSH'
+
+          if ! command -v b2 &> /dev/null; then
+            pip3 install --quiet --user b2sdk b2
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+
+          export B2_ACCOUNT_ID="${{ secrets.B2_ACCOUNT_ID }}"
+          export B2_APPLICATION_KEY="${{ secrets.B2_APPLICATION_KEY }}"
+          export B2_BUCKET_NAME="${{ secrets.B2_BUCKET_NAME }}"
+
+          b2 authorize-account "$B2_ACCOUNT_ID" "$B2_APPLICATION_KEY" > /dev/null
+
+          LAST_BACKUP=$(b2 ls --recursive "$B2_BUCKET_NAME" backups/ | tail -1)
+
+          if [ -z "$LAST_BACKUP" ]; then
+            echo "STATUS=no_backups"
+            echo "ERROR=No backups found in bucket"
+            exit 1
+          fi
+
+          echo "Last backup: $LAST_BACKUP"
+
+          LAST_DATE=$(echo "$LAST_BACKUP" | grep -oP '\d{8}' | head -1)
+          TODAY=$(date +%Y%m%d)
+
+          LAST_TIMESTAMP=$(date -d "${LAST_DATE}" +%s 2>/dev/null || date -j -f "%Y%m%d" "${LAST_DATE}" +%s)
+          TODAY_TIMESTAMP=$(date +%s)
+          DAYS_OLD=$(( (TODAY_TIMESTAMP - LAST_TIMESTAMP) / 86400 ))
+
+          echo "Last backup date: $LAST_DATE"
+          echo "Today: $TODAY"
+          echo "Backup age: $DAYS_OLD days"
+
+          BACKUP_FILENAME=$(echo "$LAST_BACKUP" | awk '{print $NF}')
+          BACKUP_SIZE=$(echo "$LAST_BACKUP" | awk '{print $(NF-2)" "$(NF-1)}')
+
+          echo "LAST_BACKUP_FILE=$BACKUP_FILENAME"
+          echo "LAST_BACKUP_SIZE=$BACKUP_SIZE"
+          echo "LAST_BACKUP_DATE=$LAST_DATE"
+          echo "BACKUP_AGE_DAYS=$DAYS_OLD"
+
+          # Allow 1 day grace period (7 days schedule + 1 day buffer)
+          if [ "$DAYS_OLD" -le 8 ]; then
+            echo "STATUS=healthy"
+            echo "✓ Backup is healthy (${DAYS_OLD} days old)"
+          else
+            echo "STATUS=outdated"
+            echo "✗ Backup is outdated (${DAYS_OLD} days old, expected within 8 days)"
+            exit 1
+          fi
+        ENDSSH
+        )
+
+        echo "$RESULT"
+        echo "$RESULT" | grep -E '^(LAST_BACKUP_FILE|LAST_BACKUP_SIZE|LAST_BACKUP_DATE|BACKUP_AGE_DAYS|STATUS)=' >> "$GITHUB_ENV"
+
+    - name: ✅ Send healthy notification
+      if: success()
+      run: |
+        curl -X POST "${{ secrets.DISCORD_WEBHOOK }}" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "embeds": [{
+              "title": "✅ Backup Health Check: Healthy",
+              "description": "PostgreSQL weekly backup verified successfully",
+              "color": 3066993,
+              "fields": [
+                {
+                  "name": "📦 Last Backup",
+                  "value": "'"$LAST_BACKUP_FILE"'",
+                  "inline": false
+                },
+                {
+                  "name": "💾 Size",
+                  "value": "'"$LAST_BACKUP_SIZE"'",
+                  "inline": true
+                },
+                {
+                  "name": "📅 Date",
+                  "value": "'"$LAST_BACKUP_DATE"'",
+                  "inline": true
+                },
+                {
+                  "name": "⏰ Age",
+                  "value": "'"$BACKUP_AGE_DAYS"' days",
+                  "inline": true
+                },
+                {
+                  "name": "📊 Schedule",
+                  "value": "Weekly (Sunday 19:00 UTC)",
+                  "inline": false
+                }
+              ],
+              "footer": {
+                "text": "Next backup: Sunday 19:00 UTC"
+              },
+              "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'"
+            }]
+          }'
+
+    - name: ⚠️ Send warning notification
+      if: failure()
+      run: |
+        curl -X POST "${{ secrets.DISCORD_WEBHOOK }}" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "content": "@here ⚠️ **BACKUP ALERT**",
+            "embeds": [{
+              "title": "❌ Backup Health Check: Failed",
+              "description": "PostgreSQL weekly backup is missing or outdated!",
+              "color": 15158332,
+              "fields": [
+                {
+                  "name": "⚠️ Issue",
+                  "value": "Last backup is more than 8 days old or missing",
+                  "inline": false
+                },
+                {
+                  "name": "📅 Last Backup Date",
+                  "value": "'"${LAST_BACKUP_DATE:-N/A}"'",
+                  "inline": true
+                },
+                {
+                  "name": "⏰ Age",
+                  "value": "'"${BACKUP_AGE_DAYS:-N/A}"' days",
+                  "inline": true
+                },
+                {
+                  "name": "🎯 Action Required",
+                  "value": "Check backup workflow and VPS connectivity",
+                  "inline": false
+                },
+                {
+                  "name": "🔗 Workflow",
+                  "value": "[View Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})",
+                  "inline": false
+                }
+              ],
+              "footer": {
+                "text": "Expected: Weekly backup on Sunday 19:00 UTC"
+              },
+              "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'"
+            }]
+          }'

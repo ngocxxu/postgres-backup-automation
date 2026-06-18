@@ -1,0 +1,6 @@
+*.sql
+*.sql.gz
+*.log
+.env
+backups/
+EOF

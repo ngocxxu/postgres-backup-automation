@@ -1,0 +1,198 @@
+name: PostgreSQL Backup
+
+on:
+  schedule:
+  # Run at 2:00 AM UTC+7 (19:00 UTC) every Sunday
+  - cron: '0 19 * * 0'
+
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: 'Retention days for old backups'
+        required: false
+        default: '30'
+        type: string
+
+env:
+  RETENTION_DAYS: ${{ github.event.inputs.retention_days || '30' }}
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - name: 📥 Checkout repository
+      uses: actions/checkout@v4
+
+    - name: 🔧 Setup SSH
+      uses: ./.github/actions/setup-ssh
+      with:
+        ssh_key: ${{ secrets.VPS_SSH_KEY }}
+        host: ${{ secrets.VPS_HOST }}
+        port: ${{ secrets.VPS_PORT }}
+
+    - name: 📤 Upload scripts to VPS
+      run: |
+        scp -P ${{ secrets.VPS_PORT }} \
+          .github/scripts/*.sh \
+          ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/
+
+    - name: 🗄️ Create PostgreSQL Backup
+      id: backup
+      run: |
+        ssh -p ${{ secrets.VPS_PORT }} \
+          ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+          'bash -s' << 'ENDSSH'
+
+          export POSTGRES_NAMESPACE="${{ secrets.POSTGRES_NAMESPACE }}"
+          export POSTGRES_LABEL_SELECTOR="${{ secrets.POSTGRES_LABEL_SELECTOR }}"
+          export POSTGRES_DB="${{ secrets.POSTGRES_DB }}"
+          export POSTGRES_USER="${{ secrets.POSTGRES_USER }}"
+          export POSTGRES_PASSWORD="${{ secrets.POSTGRES_PASSWORD }}"
+
+          chmod +x /tmp/backup-on-vps.sh
+          /tmp/backup-on-vps.sh
+        ENDSSH
+
+        echo "✓ Backup created on VPS"
+
+    - name: ☁️ Upload to Backblaze B2
+      id: upload
+      run: |
+        ssh -p ${{ secrets.VPS_PORT }} \
+          ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+          'bash -s' << 'ENDSSH'
+
+          export B2_ACCOUNT_ID="${{ secrets.B2_ACCOUNT_ID }}"
+          export B2_APPLICATION_KEY="${{ secrets.B2_APPLICATION_KEY }}"
+          export B2_BUCKET_NAME="${{ secrets.B2_BUCKET_NAME }}"
+
+          chmod +x /tmp/upload-to-b2.sh /tmp/b2-install.sh
+          /tmp/upload-to-b2.sh
+        ENDSSH
+
+        echo "✓ Uploaded to B2"
+
+    - name: 🧹 Cleanup old backups on B2
+      run: |
+        ssh -p ${{ secrets.VPS_PORT }} \
+          ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+          'bash -s' << 'ENDSSH'
+
+          export B2_ACCOUNT_ID="${{ secrets.B2_ACCOUNT_ID }}"
+          export B2_APPLICATION_KEY="${{ secrets.B2_APPLICATION_KEY }}"
+          export B2_BUCKET_NAME="${{ secrets.B2_BUCKET_NAME }}"
+          export RETENTION_DAYS="${{ env.RETENTION_DAYS }}"
+
+          chmod +x /tmp/cleanup-old-backups.sh /tmp/b2-install.sh
+          /tmp/cleanup-old-backups.sh
+        ENDSSH
+
+    - name: 📊 Get backup info
+      id: info
+      run: |
+        BACKUP_INFO=$(ssh -p ${{ secrets.VPS_PORT }} \
+          ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+          'cat /tmp/pg-backups/backup-info.env')
+
+        echo "$BACKUP_INFO"
+        echo "$BACKUP_INFO" | grep -E '^(BACKUP_FILE|BACKUP_PATH|BACKUP_SIZE|POSTGRES_POD|POSTGRES_VERSION|B2_URL)=' >> "$GITHUB_ENV"
+
+    - name: 🧹 Cleanup local files on VPS
+      if: always()
+      run: |
+        ssh -p ${{ secrets.VPS_PORT }} \
+          ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+          'bash -s' << 'ENDSSH'
+
+          chmod +x /tmp/cleanup-local.sh
+          /tmp/cleanup-local.sh
+
+          rm -f /tmp/backup-on-vps.sh /tmp/upload-to-b2.sh \
+                /tmp/cleanup-old-backups.sh /tmp/cleanup-local.sh \
+                /tmp/b2-install.sh
+        ENDSSH
+
+    - name: ✅ Send success notification to Discord
+      if: success()
+      run: |
+        curl -X POST "${{ secrets.DISCORD_WEBHOOK }}" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "embeds": [{
+              "title": "✅ PostgreSQL Backup Success",
+              "description": "Database backup completed successfully",
+              "color": 3066993,
+              "fields": [
+                {
+                  "name": "📦 Backup File",
+                  "value": "'"$BACKUP_FILE"'",
+                  "inline": false
+                },
+                {
+                  "name": "💾 File Size",
+                  "value": "'"$BACKUP_SIZE"'",
+                  "inline": true
+                },
+                {
+                  "name": "🗄️ Database",
+                  "value": "${{ secrets.POSTGRES_DB }}",
+                  "inline": true
+                },
+                {
+                  "name": "🎯 Pod",
+                  "value": "'"$POSTGRES_POD"'",
+                  "inline": true
+                },
+                {
+                  "name": "🕐 Time",
+                  "value": "'"$(date -u +"%Y-%m-%d %H:%M:%S UTC")"'",
+                  "inline": true
+                },
+                {
+                  "name": "🔗 Workflow",
+                  "value": "[View Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})",
+                  "inline": false
+                }
+              ],
+              "footer": {
+                "text": "PostgreSQL Backup Automation"
+              },
+              "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'"
+            }]
+          }'
+
+    - name: ❌ Send failure notification to Discord
+      if: failure()
+      run: |
+        curl -X POST "${{ secrets.DISCORD_WEBHOOK }}" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "embeds": [{
+              "title": "❌ PostgreSQL Backup Failed",
+              "description": "Database backup encountered an error",
+              "color": 15158332,
+              "fields": [
+                {
+                  "name": "🗄️ Database",
+                  "value": "${{ secrets.POSTGRES_DB }}",
+                  "inline": true
+                },
+                {
+                  "name": "🕐 Time",
+                  "value": "'"$(date -u +"%Y-%m-%d %H:%M:%S UTC")"'",
+                  "inline": true
+                },
+                {
+                  "name": "🔗 Workflow",
+                  "value": "[View Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})",
+                  "inline": false
+                }
+              ],
+              "footer": {
+                "text": "PostgreSQL Backup Automation"
+              },
+              "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'"
+            }]
+          }'

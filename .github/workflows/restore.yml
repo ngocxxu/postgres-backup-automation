@@ -1,0 +1,191 @@
+name: PostgreSQL Restore
+
+on:
+  workflow_dispatch:
+    inputs:
+      backup_file:
+        description: 'Backup file name (e.g., postgres_mydb_20240115_020000.sql.gz)'
+        required: true
+        type: string
+      target_db:
+        description: 'Target database name (leave empty to restore to original DB)'
+        required: false
+        type: string
+      drop_existing:
+        description: 'Drop existing database before restore?'
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+    - name: 📥 Checkout repository
+      uses: actions/checkout@v4
+
+    - name: ⚠️ Confirm restore action
+      run: |
+        echo "================================================"
+        echo "⚠️  DATABASE RESTORE OPERATION"
+        echo "================================================"
+        echo "Backup file: ${{ github.event.inputs.backup_file }}"
+        echo "Target DB: ${{ github.event.inputs.target_db || 'Original database' }}"
+        echo "Drop existing: ${{ github.event.inputs.drop_existing }}"
+        echo "================================================"
+
+    - name: 🔧 Setup SSH
+      uses: ./.github/actions/setup-ssh
+      with:
+        ssh_key: ${{ secrets.VPS_SSH_KEY }}
+        host: ${{ secrets.VPS_HOST }}
+        port: ${{ secrets.VPS_PORT }}
+
+    - name: 📥 Download backup from B2
+      id: download
+      run: |
+        ssh -p ${{ secrets.VPS_PORT }} \
+          ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+          'bash -s' << 'ENDSSH'
+
+          if ! command -v b2 &> /dev/null; then
+            pip3 install --quiet --user b2sdk b2
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+
+          export B2_ACCOUNT_ID="${{ secrets.B2_ACCOUNT_ID }}"
+          export B2_APPLICATION_KEY="${{ secrets.B2_APPLICATION_KEY }}"
+          export B2_BUCKET_NAME="${{ secrets.B2_BUCKET_NAME }}"
+
+          b2 authorize-account "$B2_ACCOUNT_ID" "$B2_APPLICATION_KEY"
+
+          mkdir -p /tmp/pg-restore
+          echo "Downloading backup: ${{ github.event.inputs.backup_file }}"
+
+          b2 download-file-by-name \
+            "$B2_BUCKET_NAME" \
+            "backups/${{ github.event.inputs.backup_file }}" \
+            "/tmp/pg-restore/${{ github.event.inputs.backup_file }}"
+
+          gunzip "/tmp/pg-restore/${{ github.event.inputs.backup_file }}"
+
+          SQL_FILE="/tmp/pg-restore/$(basename ${{ github.event.inputs.backup_file }} .gz)"
+          echo "SQL file: $SQL_FILE"
+
+          if [ ! -f "$SQL_FILE" ]; then
+            echo "ERROR: SQL file not found after decompression"
+            exit 1
+          fi
+
+          FILE_SIZE=$(du -h "$SQL_FILE" | cut -f1)
+          echo "File size: $FILE_SIZE"
+        ENDSSH
+
+    - name: 🗄️ Restore database
+      run: |
+        ssh -p ${{ secrets.VPS_PORT }} \
+          ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+          'bash -s' << 'ENDSSH'
+
+          export POSTGRES_NAMESPACE="${{ secrets.POSTGRES_NAMESPACE }}"
+          export POSTGRES_LABEL_SELECTOR="${{ secrets.POSTGRES_LABEL_SELECTOR }}"
+          export POSTGRES_USER="${{ secrets.POSTGRES_USER }}"
+          export POSTGRES_PASSWORD="${{ secrets.POSTGRES_PASSWORD }}"
+          export ORIGINAL_DB="${{ secrets.POSTGRES_DB }}"
+          export TARGET_DB="${{ github.event.inputs.target_db }}"
+          export DROP_EXISTING="${{ github.event.inputs.drop_existing }}"
+
+          # Validate database name to prevent SQL injection
+          if [[ -n "$TARGET_DB" ]] && ! [[ "$TARGET_DB" =~ ^[a-zA-Z0-9_]+$ ]]; then
+            echo "ERROR: Invalid database name: $TARGET_DB (only alphanumeric and underscore allowed)"
+            exit 1
+          fi
+
+          if [ -z "$TARGET_DB" ]; then
+            TARGET_DB="$ORIGINAL_DB"
+          fi
+
+          echo "Restoring to database: $TARGET_DB"
+
+          POSTGRES_POD=$(kubectl get pods -n "$POSTGRES_NAMESPACE" \
+            -l "$POSTGRES_LABEL_SELECTOR" \
+            -o jsonpath='{.items[0].metadata.name}')
+
+          echo "PostgreSQL pod: $POSTGRES_POD"
+
+          SQL_FILE="/tmp/pg-restore/$(basename ${{ github.event.inputs.backup_file }} .gz)"
+
+          if [ "$DROP_EXISTING" = "true" ]; then
+            echo "Dropping existing database: $TARGET_DB"
+            kubectl exec -n "$POSTGRES_NAMESPACE" "$POSTGRES_POD" \
+              --env "PGPASSWORD=$POSTGRES_PASSWORD" \
+              -- psql -U "$POSTGRES_USER" -c "DROP DATABASE IF EXISTS \"$TARGET_DB\";"
+          fi
+
+          echo "Creating database: $TARGET_DB"
+          kubectl exec -n "$POSTGRES_NAMESPACE" "$POSTGRES_POD" \
+            --env "PGPASSWORD=$POSTGRES_PASSWORD" \
+            -- psql -U "$POSTGRES_USER" -c "CREATE DATABASE \"$TARGET_DB\";" || true
+
+          echo "Restoring backup..."
+          cat "$SQL_FILE" | kubectl exec -i -n "$POSTGRES_NAMESPACE" "$POSTGRES_POD" \
+            --env "PGPASSWORD=$POSTGRES_PASSWORD" \
+            -- psql -U "$POSTGRES_USER" -d "$TARGET_DB"
+
+          echo "✓ Restore completed successfully"
+        ENDSSH
+
+    - name: 🧹 Cleanup restore files
+      if: always()
+      run: |
+        ssh -p ${{ secrets.VPS_PORT }} \
+          ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+          'rm -rf /tmp/pg-restore'
+
+    - name: 📢 Send notification
+      if: always()
+      run: |
+        if [ "${{ job.status }}" == "success" ]; then
+          COLOR=3066993
+          TITLE="✅ PostgreSQL Restore Success"
+          DESCRIPTION="Database restored successfully"
+        else
+          COLOR=15158332
+          TITLE="❌ PostgreSQL Restore Failed"
+          DESCRIPTION="Database restore encountered an error"
+        fi
+
+        curl -X POST "${{ secrets.DISCORD_WEBHOOK }}" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "embeds": [{
+              "title": "'"$TITLE"'",
+              "description": "'"$DESCRIPTION"'",
+              "color": '"$COLOR"',
+              "fields": [
+                {
+                  "name": "📦 Backup File",
+                  "value": "${{ github.event.inputs.backup_file }}",
+                  "inline": false
+                },
+                {
+                  "name": "🗄️ Target Database",
+                  "value": "${{ github.event.inputs.target_db || secrets.POSTGRES_DB }}",
+                  "inline": true
+                },
+                {
+                  "name": "🕐 Time",
+                  "value": "'"$(date -u +"%Y-%m-%d %H:%M:%S UTC")"'",
+                  "inline": true
+                },
+                {
+                  "name": "🔗 Workflow",
+                  "value": "[View Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})",
+                  "inline": false
+                }
+              ],
+              "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'"
+            }]
+          }'

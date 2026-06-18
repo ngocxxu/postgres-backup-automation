@@ -1,0 +1,21 @@
+name: Setup SSH
+description: Configure SSH key for VPS access
+
+inputs:
+  ssh_key:
+    required: true
+  host:
+    required: true
+  port:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Configure SSH
+      shell: bash
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ inputs.ssh_key }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan -p "${{ inputs.port }}" "${{ inputs.host }}" >> ~/.ssh/known_hosts
